@@ -5,49 +5,135 @@ Orchestrates 4 deep agents via LangGraph to transform FRD + data files
 into Snowflake DDL and dbt models.
 
 Install:
-    pip install deepagents langgraph langchain langchain-anthropic \
-                python-docx pypdf2 pandas
+    uv sync
 """
 
+import base64
 import io
 import os
 from pathlib import Path
 from typing import TypedDict
 
+import fitz  # PyMuPDF
 import pandas as pd
-import PyPDF2
 import docx
 from langchain.chat_models import init_chat_model
 from langgraph.graph import END, StateGraph
 from deepagents import create_deep_agent
+
+LARGE_FILE_THRESHOLD = 500 * 1024 * 1024  # 500 MB
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _count_lines(path: str) -> int:
+    """Fast newline counter that reads in 1 MB chunks."""
+    count = 0
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            count += chunk.count(b"\n")
+    return count
+
+
+def _describe_images(images: list[bytes]) -> str:
+    """Send extracted images to Claude vision and return text descriptions."""
+    if not images:
+        return ""
+    model = init_chat_model("anthropic:claude-sonnet-4-20250514")
+    descriptions = []
+    for i, img_bytes in enumerate(images, 1):
+        b64 = base64.b64encode(img_bytes).decode()
+        result = model.invoke([{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Describe this image in detail for a data architect. "
+                        "Focus on any diagrams, tables, charts, schemas, or "
+                        "textual content visible in the image."
+                    ),
+                },
+            ],
+        }])
+        descriptions.append(f"[IMAGE {i}]: {result.content}")
+    return "\n\n".join(descriptions)
 
 
 # ── File Parsing ────────────────────────────────────────────────────────────
 
 def parse_docx(path: str) -> str:
     doc = docx.Document(path)
-    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+    # Extract embedded images
+    images = []
+    for rel in doc.part.rels.values():
+        if "image" in rel.reltype:
+            images.append(rel.target_part.blob)
+
+    if images:
+        text += "\n\n## Embedded Images\n\n" + _describe_images(images)
+
+    return text
 
 
 def parse_pdf(path: str) -> str:
-    text = []
-    with open(path, "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        for page in reader.pages:
-            text.append(page.extract_text() or "")
-    return "\n".join(text)
+    doc = fitz.open(path)
+    text_parts = []
+    images = []
+    for page in doc:
+        text_parts.append(page.get_text())
+        for img in page.get_images(full=True):
+            xref = img[0]
+            pix = fitz.Pixmap(doc, xref)
+            if pix.n > 4:  # CMYK or other, convert to RGB
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            images.append(pix.tobytes("png"))
+    doc.close()
+
+    result = "\n".join(text_parts)
+    if images:
+        result += "\n\n## Embedded Images\n\n" + _describe_images(images)
+    return result
+
+
+def _parse_large_csv(path: str, sep: str) -> str:
+    """Schema + sample for CSV/TSV files over the large-file threshold."""
+    file_size_mb = os.path.getsize(path) / (1024 * 1024)
+    row_count = _count_lines(path) - 1  # subtract header
+
+    df_sample = pd.read_csv(path, sep=sep, nrows=50)
+    dtypes = df_sample.dtypes.to_frame("dtype").reset_index()
+    dtypes.columns = ["column", "dtype"]
+
+    return (
+        f"**Large file detected** — {file_size_mb:,.1f} MB, ~{row_count:,} rows\n\n"
+        f"Columns ({len(df_sample.columns)}): {list(df_sample.columns)}\n\n"
+        f"### Column Types\n{dtypes.to_markdown(index=False)}\n\n"
+        f"### Sample (first 50 rows)\n{df_sample.to_markdown(index=False)}\n\n"
+        f"### Descriptive Stats\n{df_sample.describe(include='all').to_markdown()}"
+    )
 
 
 def parse_file(path: str) -> str:
     """Route to correct parser based on extension."""
     ext = Path(path).suffix.lower()
+    file_size = os.path.getsize(path)
+
     if ext == ".docx":
         return parse_docx(path)
     elif ext == ".pdf":
         return parse_pdf(path)
     elif ext in (".csv", ".tsv"):
         sep = "\t" if ext == ".tsv" else ","
-        df = pd.read_csv(path, sep=sep, nrows=200)  # cap rows for context
+        if file_size > LARGE_FILE_THRESHOLD:
+            return _parse_large_csv(path, sep)
+        df = pd.read_csv(path, sep=sep, nrows=200)
         return f"Columns: {list(df.columns)}\n\nSample (first 10 rows):\n{df.head(10).to_markdown()}"
     elif ext in (".xlsx", ".xls"):
         df = pd.read_excel(path, nrows=200)

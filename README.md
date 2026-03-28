@@ -30,7 +30,7 @@ uv run python workflow.py \
 
 ## Supported File Types
 
-| Input | Formats                          |
-| ----- | -------------------------------- |
-| FRD   | `.docx`, `.pdf`, `.txt`          |
-| Data  | `.csv`, `.tsv`, `.xlsx`, `.json` |
+| Input | Formats                          | Notes                                        |
+| ----- | -------------------------------- | -------------------------------------------- |
+| FRD   | `.docx`, `.pdf`, `.txt`          | Embedded images are extracted and described  |
+| Data  | `.csv`, `.tsv`, `.xlsx`, `.json` | Files >500 MB are streamed (schema + sample) |
