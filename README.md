@@ -16,8 +16,8 @@ export ANTHROPIC_API_KEY="sk-..."
 
 # 4. Run the workflow
 uv run python workflow.py \
-  --frd requirements.docx \
-  --data customers.csv \
+  --frd samples/flight_plan_frd.docx \
+  --data samples/flight_plans.json \
   --prompt "Financial services customer data warehouse, PII-sensitive" \
   --out output.md
 ```
