@@ -12,6 +12,9 @@ import base64
 import io
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 from typing import TypedDict
 
 import fitz  # PyMuPDF
